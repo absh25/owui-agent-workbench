@@ -127,20 +127,33 @@ async def deliver_html(report, tools, user_id, directory, unwrap):
 
 
 def current_artifacts(messages):
-    calls, artifacts = set(), []
+    calls, plans, artifacts = set(), set(), []
     for message in messages:
         if message.get("role") == "user":
-            calls, artifacts = set(), []
+            calls, plans, artifacts = set(), set(), []
         elif message.get("role") == "assistant":
             for call in message.get("tool_calls") or []:
                 if call.get("function", {}).get("name", "").endswith("delegate_coding_task"):
                     calls.add(call.get("id"))
-        elif message.get("role") == "tool" and message.get("tool_call_id") in calls:
+                if call.get('function', {}).get('name') == 'execute_task_plan':
+                    plans.add(call.get('id'))
+        elif message.get("role") == "tool" and message.get("tool_call_id") in calls | plans:
+            from supervisor.task_plan import decode_tool_result
             try:
-                report = json.loads(message.get("content") or "{}")
+                report = decode_tool_result(message.get("content") or "{}")
             except (ValueError, TypeError):
                 continue
-            if isinstance(report, dict) and report.get("status") == "completed":
+            reports = [report]
+            if message.get('tool_call_id') in plans:
+                from supervisor.task_plan import tool_kind
+                reports = [task.get('result') for task in report.get('tasks', [])
+                           if isinstance(task, dict) and task.get('status') == 'succeeded'
+                           and tool_kind(task.get('tool', '')) == 'delegate_coding_task'
+                           and isinstance(task.get('result'), dict)
+                           and (task['result'].get('verification') or {}).get('passed') is True] if isinstance(report, dict) else []
+            for report in reports:
+                if not isinstance(report, dict) or report.get('status') != 'completed':
+                    continue
                 artifacts.extend(item for item in report.get("artifacts", [])
                                  if isinstance(item, dict) and item.get("file_id"))
                 if (report.get("verification") or {}).get("passed") is True:

@@ -1,0 +1,3 @@
+# Prepared artifacts are checked by their exact reviewed byte hash.
+supervisor/demo_assets/*.html text eol=lf
+supervisor/demo_assets/*.json text eol=lf

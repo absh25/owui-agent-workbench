@@ -1,4 +1,4 @@
-"""Install the Jira editor into the pinned Open WebUI v0.11.4 frontend.
+"""Install the Jira editor and optional native task-plan status styling.
 
 Only the Jira-tagged confirmation branch is changed. Fail closed when an
 upstream build changes the expected branch, rather than guessing at minified JS.
@@ -29,6 +29,8 @@ REPLACEMENT = (
 INDEX_MARKER = "<!-- owui-jira-review-assets -->"
 CACHE_PATCH_VERSION = "module-graph-v1"
 MANIFEST_NAME = "jira-review-manifest.json"
+REQUIRED_ASSET_NAMES = ("jira-confirmation.js", "jira-confirmation.css")
+TASK_PLAN_ASSET_NAMES = ("task-plan-status.js", "task-plan-status.css")
 _GENERATED = re.compile(r"\.jira-[0-9a-f]{12}\.js$")
 _TOKENS = re.compile(
     r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`',
@@ -129,6 +131,10 @@ def _without_asset_block(index: str) -> str:
 
 
 def install(build: Path, assets: Path) -> dict[str, str]:
+    optional_present = [(assets / filename).is_file() for filename in TASK_PLAN_ASSET_NAMES]
+    if any(optional_present) and not all(optional_present):
+        raise RuntimeError("Incomplete task plan assets: provide both task-plan-status.js and task-plan-status.css")
+    asset_names = REQUIRED_ASSET_NAMES + (TASK_PLAN_ASSET_NAMES if all(optional_present) else ())
     manifest_path = build / "assets" / MANIFEST_NAME
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else None
     if manifest is not None and (manifest.get("version") != 1 or not isinstance(manifest.get("mapping"), dict)):
@@ -187,8 +193,7 @@ def install(build: Path, assets: Path) -> dict[str, str]:
 
     effective_sources = {path: sources[path].replace(ORIGINAL, REPLACEMENT) if path == bundle else sources[path]
                          for path in sorted(closure)}
-    asset_bytes = [(assets / filename).read_bytes() for filename in (
-        "jira-confirmation.js", "jira-confirmation.css")]
+    asset_bytes = [(assets / filename).read_bytes() for filename in asset_names]
     digest_parts = asset_bytes + [ORIGINAL.encode(), REPLACEMENT.encode(), CACHE_PATCH_VERSION.encode()]
     digest_parts += [(path + "\x00" + code).encode("utf-8") for path, code in effective_sources.items()]
     digest = hashlib.sha256(b"\x00".join(digest_parts)).hexdigest()[:12]
@@ -212,12 +217,12 @@ def install(build: Path, assets: Path) -> dict[str, str]:
             raise RuntimeError("Invalid Svelte frontend version")
     if manifest is not None and upstream_version_hash != manifest.get("upstream_version_sha256"):
         raise RuntimeError("Svelte frontend version differs from the Jira module manifest")
-    block = (
-        INDEX_MARKER + "\n"
-        f'<link rel="stylesheet" href="/assets/jira-confirmation.css?v={digest}">\n'
-        f'<script src="/assets/jira-confirmation.js?v={digest}"></script>\n'
-        "<!-- /owui-jira-review-assets -->\n"
+    asset_tags = "".join(
+        f'<link rel="stylesheet" href="/assets/{filename}?v={digest}">\n'
+        if filename.endswith(".css") else f'<script src="/assets/{filename}?v={digest}"></script>\n'
+        for filename in sorted(asset_names, key=lambda name: not name.endswith(".css"))
     )
+    block = INDEX_MARKER + "\n" + asset_tags + "<!-- /owui-jira-review-assets -->\n"
     index = index.replace("</head>", block + "</head>")
 
     # All compatibility assertions above run before any frontend mutation.
@@ -225,7 +230,7 @@ def install(build: Path, assets: Path) -> dict[str, str]:
         (build / path).write_text(code, encoding="utf-8")
     target_assets = build / "assets"
     target_assets.mkdir(parents=True, exist_ok=True)
-    for filename in ("jira-confirmation.js", "jira-confirmation.css"):
+    for filename in asset_names:
         shutil.copyfile(assets / filename, target_assets / filename)
     index_path.write_text(index, encoding="utf-8")
     # Svelte embeds the upstream version in its unchanged runtime. Keep

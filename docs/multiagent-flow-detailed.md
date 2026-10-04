@@ -2,13 +2,89 @@
 
 核对日期：2026-10-04。以下图示描述当前代码行为，不把后续规划画成已实现能力。
 
-当前为主助手委派式协作：主助手规划任务，检索 Agent 与编码 Agent 各自在独立任务上下文中执行，再将结构化结果交回主助手。专业 Agent 之间主要通过主助手交接资料和结果。
+当前为主助手委派式协作：主助手规划任务，检索 Agent 与编码 Agent 各自在独立上下文中执行。直接委派时主助手消费结构化结果；复合任务中，主助手制定依赖计划，执行器把实际成功的直接依赖结果加入编码上下文，无需主模型额外总结证据。专业 Agent 不直接互相调用或共享完整聊天上下文。
 
-视觉复核是独立验收模块，不是第四个 Agent；Jira MCP 是业务工具，不是 Jira Agent。图中的路由是任务的逻辑分支，没有另一个专用路由 Agent。同一个需求可以先检索，再编码，最后按用户明确要求执行 Jira 操作。
+视觉复核是独立验收模块，不是第四个 Agent；Jira MCP 是业务工具，不是 Jira Agent；请求内执行器也不是新的自主 Agent。普通 native 工具调用保持当前 OWUI 串行路径，只有 `execute_task_plan` 内具备条件的节点真实并行。业务写入继续走直接调用及确认流程，不进入任务计划。
 
 默认预算来自代码中的 Valves 配置，部署时可配置。图中“验收通过”与“附件交付成功”是不同状态；编码 `completed` 不能替代附件结果检查。
 
-## 图 1：端到端协作与交接
+## 图 0：请求内任务计划与真实并发
+
+这个流程对应新增的 `execute_task_plan`。现有 [五张 PNG/SVG](diagrams/README.md) 展开单专业执行、验收与确认，尚未重导出任务 DAG、30 秒排队和非阻塞视觉建议；当前行为以本文 Mermaid 为准。
+
+### 复合任务的依赖图
+
+```mermaid
+flowchart LR
+    U["OWUI 用户提出复合目标"] --> M["主助手一次制定任务计划<br/>tasks / id / tool / arguments / depends_on"]
+    M --> P["execute_task_plan<br/>校验当前请求授权工具、参数和完整 DAG"]
+    P --> A["A 检索 Agent<br/>知识查询、原文核对"]
+    P --> B["B Jira 只读工具<br/>真实可见项目查询"]
+    A --> G{"实际结果 sufficient？"}
+    G -->|"是"| C["C 编码 Agent<br/>只等待 A，注入真实依赖结果"]
+    G -->|"否"| X["C blocked<br/>没有执行编码，报告证据缺口"]
+    C --> V["独立验收与有限修复<br/>真实测试、固定标准、原测试保护"]
+    V --> CE["C 成功或失败的实际终态"]
+    B --> W["等待计划内全部节点达到终态"]
+    CE --> W
+    X --> W
+    W --> R["Pipe 按执行报告生成 Markdown<br/>状态、时间、峰值、引用与验收"]
+    R --> U
+
+    classDef main fill:#eaf2ff,stroke:#416fac,color:#163659;
+    classDef retrieval fill:#e8f7f4,stroke:#318278,color:#174d47;
+    classDef coding fill:#f0edff,stroke:#7663ab,color:#443267;
+    classDef gate fill:#fff4df,stroke:#b68832,color:#6d4d16;
+    classDef fail fill:#ffeded,stroke:#be6262,color:#7b3333;
+    class U,M,R main;
+    class A retrieval;
+    class C,CE coding;
+    class P,B,G,V,W gate;
+    class X fail;
+```
+
+A、B 无依赖，实际运行区间可以重叠。C 只直接依赖 A，A 充分证据完成后即可开始，不等待无关 B；B 失败只影响依赖 B 的下游。最终汇总等待所有节点达到终态，不把某个分支失败当成其他独立任务必须失败的理由。
+
+计划同时包含检索与编码时，编码必须直接依赖该检索节点；一个计划最多一次检索、一次编码。检索 `sufficient` 才算节点成功；编码须 `completed` 且 `verification.passed=true` 才成功。专业执行预算和工作区锁仍然适用，不通过拆分计划内委派绕过。
+
+### 执行器的调度、停止与收尾
+
+```mermaid
+flowchart TD
+    P0["接收本次 tasks<br/>仅使用当前已授权且经治理的 callable"] --> P1{"全计划有效？<br/>最多 6 项；真实准入工具与参数<br/>依赖存在、无环、资料直接依赖"}
+    P1 -->|"否"| PI["invalid_arguments<br/>execution_started=false<br/>有限参数纠正，尚未启动任何任务"]
+    P1 -->|"是"| P2["初始化状态<br/>无依赖 ready；有依赖 waiting<br/>建立请求内截止时间"]
+    P2 --> P3{"还有 pending 或 running？"}
+    P3 -->|"没有"| PR["生成真实报告<br/>completed 或 partial_failed"]
+    P3 -->|"有"| PT{"请求取消或已到截止？"}
+    PT -->|"是"| PC["cancel 正在运行的异步任务<br/>await 全部退出并清理<br/>未启动任务终止；不保留后台计划"]
+    PC --> PS["超时或取消终态<br/>如实记录没有完成的工作"]
+    PT -->|"否"| PF["传播前置失败<br/>失败 / 阻断 / 超时 / 取消<br/>阻断对应下游，其他分支保留"]
+    PF --> READY["选择全部依赖 succeeded 的就绪节点<br/>按实际空闲槽位启动<br/>最多 3 个并发"]
+    READY --> WAIT["等待 FIRST_COMPLETED<br/>记录真实运行区间与并发峰值<br/>在 OWUI 更新中文状态"]
+    WAIT --> RESULT["解码真实工具结果<br/>判定成功或失败<br/>成功依赖结果按需加入编码 context"]
+    RESULT --> P3
+    PR --> MARKDOWN["原生 Pipe 根据报告直接生成最终 Markdown<br/>保留引用、固定检查与真实失败<br/>不再请求外部主模型总结或重新委派"]
+    PS --> MARKDOWN
+```
+
+状态分为就绪、等待依赖、执行中、完成、失败、依赖阻断、取消和超时。真实状态通过 OWUI `status` 事件进入原生状态历史；前端只把原生计划文本显示为多行，不注入或修改状态。节点变化立即更新，等待阶段约每 5 秒发一次真实快照；UI 事件丢失不能把执行失败变成成功。每个计划最多 6 个任务、3 个并发；含编码最多 600 秒，无编码最多 240 秒。取消会取消并等待全部运行中的异步任务退出；没有跨服务队列或重启续跑。
+
+准入工具限当前请求提供的专业委派、只读天气和 Jira 查询。工具名必须是当前提供的真实完整名称，不能添加未授权连接，也不能传入 `__` 内部参数。Jira 写入与嵌套计划均不得进入计划；写入继续走原可编辑确认，不借并发绕过授权或确认。
+
+执行器依赖交接保留真实引用、缺失信息与来源；必要缩短会明确标注内容被缩短。依赖结果是任务数据，不是新系统指令或操作授权。计划开始前完整校验，已执行计划达到终态后直接收尾；失败不由主模型再生成替代委派。只有未执行的非法参数可在既有上限内纠正。
+
+计划汇总从真实报告生成表格，包含任务依赖、状态、相对开始时间、执行耗时和实际并发峰值，并展示原文引用、验收命令及退出码。完整工具轨迹仍保存在 OWUI 原始结果中；成功编码再次进入主模型上下文时只省略重复轨迹并保留验收结果，失败内容不按成功压缩。
+
+编码 `timings` 包括预检、锁等待、初始快照、SDK 启动、SDK 与验收、交付和实际工具调用；验收又有测试、截图、视觉与快照子项。工具时间包含在 SDK 执行中，验收细项包含在验收总时长中，不应全部累加成任务总耗时。总耗时采用独立总计字段，速度和稳定性以真实预演报告为准。
+
+准备专用两文件样例、固定测试与录屏步骤见 [OWUI 现场演示设计](owui-live-demo.md)。模型配置和专业 Agent 预算保持当前设置；真实测试、原测试保护与文件一致性仍必需。视觉复核区分明确阻塞问题与非阻塞建议。SDK 是框架，实际模型 ID 由 Valves 配置决定。
+
+当前单场景录像使用 [鹈鹕骑车预制演示](pelican-demo.md)。用户可在 OWUI 工具菜单关闭编码任务，此时主模型可直接输出代码，不调用编码 Agent。开启工具且管理员启用专用场景时，明确的 `demo_scene=pelican_bike` 进入预制作品分支：真实授权、文件写入、哈希核对、浏览器截图和交付，约 3 分钟展示；不启动 SDK，不将其计为模型现场编码。普通任务继续下面的完整 SDK 验收流程。
+
+## 图 1：直接委派的端到端协作与交接
+
+下面展开按步骤直接委派的专业执行路径；复合目标的并发与依赖交接使用图 0。
 
 ```mermaid
 flowchart TD
@@ -21,6 +97,9 @@ flowchart TD
         QA["普通问答、代码片段解释<br/>必要时调用当前可用的搜索或记忆工具"]
     end
     ROUTE -->|普通问答| QA
+    ROUTE -->|多个独立任务与依赖| PLAN["execute_task_plan<br/>请求内任务 DAG，详见图 0"]
+    PLAN --> PLANFINAL["按实际报告直接汇总<br/>终态后不重新委派"]
+    PLANFINAL --> FINAL
 
     subgraph RETRIEVAL["专业执行者 1：检索 Agent"]
         RT["delegate_retrieval_task<br/>完整问题、必要上下文、证据验收条件"]
@@ -71,7 +150,8 @@ flowchart TD
     classDef coding fill:#f0edff,stroke:#7663ab,color:#443267;
     classDef gate fill:#fff4df,stroke:#b68832,color:#6d4d16;
     classDef fail fill:#ffeded,stroke:#be6262,color:#7b3333;
-    class OW,ACL,M,QA,MERGE,FINAL main;
+    class OW,ACL,M,QA,MERGE,FINAL,PLANFINAL main;
+    class PLAN gate;
     class RT,RL,RR,ANSWER,HANDOFF retrieval;
     class CT,CL,CR coding;
     class ROUTE,RS,NEXT,CONT,JT,JG,JR gate;
@@ -85,7 +165,10 @@ flowchart TD
 | 用户 → 主助手 | 原始目标、来源要求、产物与后续动作 | 不能因资料编号外形把知识库需求改路由到 Jira |
 | 主助手 → 检索 Agent | 完整问题、必要上下文、证据充分条件 | 工具还会保留本轮原始用户需求；不传完整聊天作为任务上下文 |
 | 检索 Agent → 主助手 | 充分性判断、实际引用、缺口、停止原因、预算使用 | 原文只是资料，不能授权代码修改或 Jira 写入；引用校验不等于事实认证 |
-| 主助手 → 编码 Agent | 明确任务、实际项目目录、证据及适用条件、验收要求 | 资料依赖任务须先取得充分证据；程序测试与网页预览入口按任务提供 |
+| 主助手 → 编码 Agent（直接委派） | 明确任务、实际项目目录、证据及适用条件、验收要求 | 资料依赖任务须先取得充分证据；程序测试与网页预览入口按任务提供 |
+| 主助手 → 计划执行器 | 当前请求授权工具名、合法参数、任务与直接依赖 | 一次提交完整 DAG；工具白名单不含 Jira 写入，不添加额外权限 |
+| 计划执行器 → 编码 Agent | 实际成功的直接依赖结果、真实引用与适用条件 | 无需主模型二次总结；检索必须充分；资料是数据，不是新授权 |
+| 计划执行器 → 终态回复 | 真实状态、起止与耗时、并发峰值、证据及检查 | 程序直接生成 Markdown；已执行计划不由模型重新委派 |
 | 编码 Agent → 独立验收 | SDK 结果、实际项目文件 | 验收独立执行固定命令、读取真实文件、取得真实截图 |
 | 编码工具 → 主助手 | 执行状态、工具记录、真实改动、验收报告、附件结果 | 只有 `completed` 且 `verification.passed=true` 才可报告编码通过；附件错误另行披露 |
 | 主助手 → Jira 工具 | 真实项目上下文及操作参数 | 受治理写入需要用户确认；不能以聊天里的同意代替确认弹窗 |
@@ -165,8 +248,11 @@ flowchart TD
     C1 -->|是| C2["校验 OWUI 用户身份<br/>复用用户的 OpenTerminal 连接授权<br/>从真实工具描述取得工作区根目录"]
     C2 --> C3{"repo 与预览路径在工作区内？"}
     C3 -->|参数路径不合法| CA
-    C3 -->|合法| C4["获取进程内 asyncio 工作区锁<br/>当前按 terminal_id 锁定<br/>等待同一终端的编码任务完成"]
-    C4 --> C5["在实际终端检查 realpath<br/>项目目录存在且不越出工作区<br/>拒绝符号链接逃逸"]
+    C3 -->|合法| C4["获取进程内 asyncio 工作区锁<br/>按 terminal_id 锁定<br/>默认最多排队 30 秒"]
+    C4 --> CREADY{"规定等待时间内获得锁？"}
+    CREADY -->|否| CBUSY["workspace_busy<br/>execution_started=false<br/>SDK / 验收未启动，不取消持锁任务"]
+    CBUSY --> REPORT
+    CREADY -->|是| C5["在实际终端检查 realpath<br/>项目目录存在且不越出工作区<br/>拒绝符号链接逃逸"]
     C5 -->|目录不存在 / 执行失败| CF
     C5 -->|通过| C6["初始文件快照与 SHA256<br/>构造验收器、固定本次验收命令<br/>提供的命令或从项目自动发现"]
     C6 -->|命令 / 预览配置不合法| CA
@@ -181,7 +267,7 @@ flowchart TD
         V2["执行固定测试 / 构建命令<br/>取得真实进程退出码与输出<br/>零测试不能算通过<br/>禁止吞错、管道或固定输出替代验收"]
         V3{"任务是否需要网页 / SVG 验收？"}
         V4["Playwright 浏览器真实渲染<br/>桌面 1280 × 800：2 帧<br/>手机 390 × 844：1 帧<br/>检查加载错误、空白和横向溢出"]
-        V5["视觉模型复核真实截图<br/>依据 task 与 acceptance 检查主体、布局<br/>姿态、裁切及动画连接关系"]
+        V5["视觉模型复核真实截图<br/>用户明确要求 / 可用性缺陷进入 issues<br/>未要求的审美或可选改进进入 suggestions<br/>建议不阻塞通过"]
         V6["核对文件一致性<br/>本地入口 source_sha256 与快照一致<br/>验收前后文件未发生变化"]
     end
     V0 --> V1 --> V2 --> V3
@@ -212,22 +298,22 @@ flowchart TD
     classDef success fill:#e7f6ed,stroke:#479869,color:#235438;
     classDef fail fill:#ffeded,stroke:#be6262,color:#7b3333;
     class C0,C2,C4,C5,C6,C7,C8,CC,V0,V1,V2,V4,V5,V6,VF,D0,D1,REPORT action;
-    class C1,CA,CQ,C3,C9,V3,VP,VR,D2 gate;
+    class C1,CA,CQ,C3,CREADY,C9,V3,VP,VR,D2 gate;
     class CP,DOK success;
-    class CF,CFAIL,VFAIL,DERR fail;
+    class CF,CBUSY,CFAIL,VFAIL,DERR fail;
 ```
 
 ### 编码流程的具体边界
 
 - 参数纠错与验收修复分别计数。参数最多纠正 2 次；默认验收修复最多 2 次，对应首次验收加两次修复后的验收，共最多 3 轮。
-- SDK 默认 `MAX_TURNS=20`，任务执行超时默认 600 秒。修复不会绕过 SDK 轮次错误或重置整次执行超时。当前 SDK 执行超时不包含取得工作区锁前的排队时间。
+- SDK 默认 `MAX_TURNS=20`，SDK 执行＋独立验收＋修复共用默认 600 秒预算，不含授权、预检与锁前排队。排队独立默认最多 30 秒（`WORKSPACE_WAIT_SECONDS`）；到期为 `workspace_busy` 且没有启动 SDK/验收，不取消持锁任务。请求内计划的整体截止同时适用，先到的停止条件生效。修复不重置整次执行预算。
 - 进程内锁按 `terminal_id` 共享，不是分布式锁，也没有多机并发调度器。它主要防止当前进程中的同一终端编码任务互相改写文件。
 - 锁与 `realpath` 检查确认任务工作目录边界；它们不是对任意 shell 命令的完整操作系统级隔离。命令运行仍依赖 OpenTerminal 的执行环境与用户授权。
 - 验收器是顺序执行的：文件检查 → 固定命令 → 浏览器 / 视觉检查 → 文件一致性检查。图中没有并行投票或 Agent 互相讨论。
 - 代码修改需要可执行验收；前端项目可能同时需要测试与截图。纯 HTML/SVG 绘图用 `verification_commands=[]`，由文件、浏览器与视觉检查验收，不用 `test`、`ls`、`echo` 替代。
 - 纯只读分析与文档修改按任务要求检查，不强制运行代码测试。`read_only=true` 仍会核对文件是否实际被修改。
 - 本地 HTML/SVG 入口核对源文件 SHA256。HTTP 入口检查运行页面，不能用这个机制宣称已完整证明运行服务与全部代码来源一致。
-- SVG 以图片形式渲染与预览，不将其作为活动脚本文档运行。视觉验收不能保证主观美感，也不能代替点击、输入等交互功能测试。
+- SVG 以图片形式渲染与预览，不作为活动脚本文档运行。视觉 `issues` 限明确要求和可用性缺陷；未要求的美化放入非阻塞 `suggestions`。视觉检查不能保证主观美感，也不能替代实际点击、输入等交互测试。
 - 自动原件附件当前主要面向 HTML/SVG；其他程序文件不因此自动全部打包为附件。附件生成错误记录为 `delivery_errors`，与编码验收结果分开。
 - 当前失败会由主助手据实际报告停止；失败后的文件改动不会自动回滚。
 
@@ -292,7 +378,10 @@ Jira 写入确认是当前受治理写入的专门边界，不代表项目全部
 
 | 图中职责 | 源文件 |
 |---|---|
-| 主助手提示、工具过滤、当轮停止边界、结果预览 | [`supervisor/native_pipe.py`](../supervisor/native_pipe.py) |
+| 主助手提示、工具过滤、请求内编排入口、当轮停止边界、结果预览 | [`supervisor/native_pipe.py`](../supervisor/native_pipe.py) |
+| 任务参数校验、请求内并发、真实依赖交接、取消清理 | [`supervisor/task_plan.py`](../supervisor/task_plan.py) |
+| 计划终态 Markdown、参数纠正计数、成功上下文压缩 | [`supervisor/plan_results.py`](../supervisor/plan_results.py) |
+| 专用演示样例与固定测试准备 | [`supervisor/prepare_demo_live.py`](../supervisor/prepare_demo_live.py) |
 | 检索连接授权、检索循环、预算、引用校验 | [`supervisor/retrieval_tool.py`](../supervisor/retrieval_tool.py) |
 | 编码参数、终端授权、工作区锁、SDK 会话、结果状态 | [`supervisor/coding_tool.py`](../supervisor/coding_tool.py) |
 | 固定命令、文件快照、截图与视觉复核、同会话修复 | [`supervisor/verification.py`](../supervisor/verification.py) |
@@ -305,7 +394,7 @@ Jira 写入确认是当前受治理写入的专门边界，不代表项目全部
 
 ## 维护与导出
 
-四张图分别维护：总流程、检索细节、编码细节、Jira 细节。节点 ID 按 `R`、`C/V/D`、`J` 区分职责，便于修改后核对引用和流程边。
+本文维护六个 Mermaid 代码块：图 0 的复合任务 DAG 与请求内调度，以及图 1–4 的直接委派、检索、编码验收和 Jira。现有五张导出 PNG/SVG 是专业执行展开图，尚未导出新增调度图；更新时明确区分，不把旧导出图标为已经包含 DAG。节点 ID 按 `P`、`R`、`C/V/D`、`J` 区分职责，便于核对引用和流程边。
 
 更改预算、工具授权、状态语义、确认行为或附件交付时，先对照对应实现更新图中的判断与停止分支，再更新录屏材料。不要只改数字，而保留已经不成立的路径。
 

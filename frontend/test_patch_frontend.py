@@ -93,6 +93,37 @@ class PatchFrontendTests(unittest.TestCase):
         self.assertEqual(expected, self.snapshot())
         self.assertEqual(self.index.read_text(encoding="utf-8").count(INDEX_MARKER), 1)
 
+    def test_optional_task_plan_assets_install_and_each_update_changes_digest(self):
+        names = ("task-plan-status.js", "task-plan-status.css")
+        for name in names:
+            shutil.copyfile(Path(__file__).parent / name, self.assets / name)
+        previous = install(self.build, self.assets)
+        for name in names:
+            copied = self.build / "assets" / name
+            self.assertEqual(copied.read_bytes(), (self.assets / name).read_bytes())
+            self.assertIn(f'/assets/{name}?v={previous["assets_version"]}', self.index.read_text(encoding="utf-8"))
+        for name in names:
+            source = self.assets / name
+            source.write_bytes(source.read_bytes() + b"\n/* updated optional asset */\n")
+            current = install(self.build, self.assets)
+            self.assertNotEqual(previous["assets_version"], current["assets_version"])
+            index = self.index.read_text(encoding="utf-8")
+            for asset in names:
+                self.assertIn(f'/assets/{asset}?v={current["assets_version"]}', index)
+            self.assertEqual((self.build / "assets" / name).read_bytes(), source.read_bytes())
+            previous = current
+        expected = self.snapshot()
+        install(self.build, self.assets)
+        self.assertEqual(expected, self.snapshot())
+        self.assertEqual(self.version.read_bytes(), self.original_version)
+
+    def test_incomplete_optional_task_plan_assets_fail_before_mutation(self):
+        shutil.copyfile(Path(__file__).parent / "task-plan-status.js", self.assets / "task-plan-status.js")
+        expected = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, "Incomplete task plan assets"):
+            install(self.build, self.assets)
+        self.assertEqual(expected, self.snapshot())
+
     def test_asset_update_loads_new_graph_and_retains_previous_graph(self):
         first = install(self.build, self.assets)
         old_mapping = self.mapping()

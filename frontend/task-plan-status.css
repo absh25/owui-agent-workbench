@@ -1,0 +1,31 @@
+/* Scope the override to the existing, text-matched task-plan status only. */
+.owui-task-plan-status[data-owui-task-plan-status] {
+  display: block !important;
+  -webkit-line-clamp: unset !important;
+  line-clamp: unset !important;
+  -webkit-box-orient: initial !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  white-space: pre-line !important;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  max-height: none;
+  margin-block: 0.25rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.65rem;
+  background: #f1f5f9;
+  color: #243b53 !important;
+  font-weight: 500;
+  line-height: 1.65;
+}
+
+html.dark .owui-task-plan-status[data-owui-task-plan-status] {
+  border-color: #45566e;
+  background: #1e293b;
+  color: #dce8f5 !important;
+}

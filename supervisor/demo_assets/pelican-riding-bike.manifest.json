@@ -1,0 +1,37 @@
+{
+  "scene": "pelican_bike",
+  "source_sha256": "c5588d8aba2428efe531332869b539270d95e029d54ea0d0f58ba4f8a8410c65",
+  "previous_source_sha256": [
+    "95ed04acfc8e684888f301b75034444d1aea4b5fe953619d6207525eb1b44b78"
+  ],
+  "required_selectors": [
+    "#scene",
+    "#pelican",
+    "#bike",
+    "#wheel-front",
+    "#wheel-back",
+    "#crank"
+  ],
+  "visual_review": {
+    "passed": true,
+    "reviewed_at": "2026-10-04 Asia/Shanghai",
+    "summary": "已人工查看实际桌面与手机截图；画面无可见文字，配色和边框装饰简化，主体完整，鹈鹕坐在车座并踩踏，长喙与喉囊清晰。",
+    "checked": [
+      "1280×800 和 390×844 主体与车轮可见且在视口内",
+      "无横向溢出或页面脚本错误",
+      "实际曲柄变换随时间改变；减少动态设置时保持静止",
+      "脚部坐标和踏板使用同一圆周计算，双脚保持贴合"
+    ],
+    "limits": "记录的是当前作品及截图，不代表任意新代码的视觉验收。运行时主体标记检查仅核对源文件。",
+    "screenshots": [
+      {
+        "viewport": "desktop",
+        "sha256": "eec2acaf83799e64b4dc6f3ede1d6111a90d392c7e9c397652a67ee54dd096ac"
+      },
+      {
+        "viewport": "mobile",
+        "sha256": "b3459cb29870576b512dfae81722534f61eab1d7fa0d55f1d2e3ec175ae44cc2"
+      }
+    ]
+  }
+}
