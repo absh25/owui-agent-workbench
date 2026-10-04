@@ -1,0 +1,94 @@
+FROM ghcr.io/open-webui/open-terminal:slim
+
+# Install the common authoring and development stack once in the image. The
+# upstream entrypoint starts as root and drops privileges to `user` itself.
+USER root
+
+# General development tools, HTML/XML inspection, office conversion, and
+# fonts that cover both Latin and CJK documents. Chromium is intentionally
+# omitted because it adds a large browser runtime and is not needed to author
+# HTML or DOCX files.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    printf 'Acquire::Retries "5";\n' > /etc/apt/apt.conf.d/80-retries \
+    && apt-get update \
+    && success=0 \
+    && for attempt in 1 2 3 4 5; do \
+        if apt-get install -y --no-install-recommends \
+            build-essential nodejs npm git curl wget ca-certificates \
+            jq tree ripgrep fd-find file zip unzip sqlite3 \
+            openssh-client rsync procps lsof less nano vim-tiny \
+            iproute2 iputils-ping dnsutils netcat-openbsd \
+            p7zip-full xz-utils cmake pkg-config graphviz \
+            ghostscript qpdf imagemagick \
+            shellcheck make pandoc tidy libxml2-utils \
+            libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress \
+            poppler-utils fonts-dejavu fonts-liberation; then \
+            success=1; break; \
+        fi; \
+        echo "apt install attempt ${attempt} failed; retrying"; \
+        apt-get update; \
+        sleep 5; \
+      done \
+    && test "$success" = 1 \
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd
+
+# Keep CJK fonts in a separate layer: large font archives are more prone to
+# transient mirror/proxy failures and should not invalidate the office/tools
+# layer. WenQuanYi provides practical Simplified Chinese coverage at a much
+# smaller download size than the full Noto CJK collection.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    success=0 \
+    && for attempt in 1 2 3 4 5; do \
+        if apt-get update \
+            && apt-get install -y --no-install-recommends fonts-wqy-zenhei; then \
+            success=1; break; \
+        fi; \
+        echo "CJK font install attempt ${attempt} failed; retrying"; \
+        sleep 5; \
+      done \
+    && test "$success" = 1 \
+    && fc-cache -f
+
+# Libraries used by generated HTML, DOCX/PPTX/XLSX, PDF, images, data
+# analysis, and validation scripts.
+RUN python -m ensurepip --upgrade \
+    && python -m pip install --no-cache-dir --retries 10 --timeout 60 \
+        python-docx python-pptx openpyxl XlsxWriter \
+        pypdf pdfplumber pdf2image reportlab Pillow \
+        pandas numpy matplotlib \
+        beautifulsoup4 html5lib lxml defusedxml Jinja2 Markdown \
+        requests httpx PyYAML pydantic SQLAlchemy duckdb xlrd odfpy \
+        'markitdown[pptx]' \
+        pytest ruff black
+
+# JavaScript/TypeScript, formatting, linting, and richer DOCX generation.
+RUN npm install -g --omit=dev \
+        docx typescript tsx pnpm prettier eslint htmlhint markdownlint-cli2 \
+    && npm cache clean --force
+
+# The slim image starts its API as UID/GID 1000. Pre-create the mount point
+# with that ownership so a newly-created named volume is writable by the file
+# browser as well as by terminal commands.
+RUN mkdir -p /workspace/wenguang.wu \
+    && chown -R 1000:1000 /workspace/wenguang.wu \
+    && chmod 700 /workspace/wenguang.wu
+
+# Fail the image build immediately if a package was installed but its runtime
+# entrypoint/import is unavailable. This keeps the terminal image reproducible
+# instead of discovering missing components during an Agent task.
+RUN set -eux; \
+    for command in git curl jq rg fd node npm python soffice pandoc pdftotext \
+        qpdf gs dot ssh rsync sqlite3 shellcheck; do \
+        command -v "$command"; \
+    done; \
+    python -c "import docx, pptx, openpyxl, pypdf, pdfplumber, PIL, pandas, numpy, matplotlib, bs4, lxml, requests, httpx, yaml, pydantic, sqlalchemy, duckdb, xlrd, odf"
+
+# Upstream intentionally labels a browser root equal to the current home as
+# "Home". Keep all behavior intact but allow a friendly per-workspace label.
+RUN python -c "from pathlib import Path; p=Path('/usr/local/lib/python3.12/site-packages/open_terminal/main.py'); s=p.read_text(); old='label = \"Home\" if root_path == fs.home else os.path.basename(root_path) or root_path'; new='label = os.environ.get(\"OPEN_TERMINAL_FILE_BROWSER_LABEL\") or (\"Home\" if root_path == fs.home else os.path.basename(root_path) or root_path)'; assert old in s; p.write_text(s.replace(old,new,1))"
+
+# Keep the upstream runtime user contract intact: its entrypoint needs root
+# briefly so it can apply the requested UID/GID and then drop privileges.
+USER root

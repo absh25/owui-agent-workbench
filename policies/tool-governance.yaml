@@ -1,0 +1,54 @@
+version: "1"
+
+defaults:
+  mode: passthrough
+
+tools:
+  search_jira:
+    mode: passthrough
+
+  get_jira_ticket:
+    mode: passthrough
+
+  create_jira_ticket:
+    mode: governed
+    workflow: jira
+
+  update_jira_ticket:
+    mode: governed
+    workflow: jira
+
+  transition_jira_ticket:
+    mode: governed
+    workflow: jira
+
+  add_jira_comment:
+    mode: governed
+    workflow: jira
+
+  delete_jira_ticket:
+    mode: deny
+    reason: "Agent is not allowed to delete Jira issues."
+
+# OWUI commonly prefixes remote MCP tool names with the connection id. Exact
+# entries above remain useful for local tools; the first matching pattern wins.
+patterns:
+  - match: "*delete_jira_ticket"
+    mode: deny
+    reason: "Agent is not allowed to delete Jira issues."
+
+  - match: "*create_jira_ticket"
+    mode: governed
+    workflow: jira
+
+  - match: "*update_jira_ticket"
+    mode: governed
+    workflow: jira
+
+  - match: "*transition_jira_ticket"
+    mode: governed
+    workflow: jira
+
+  - match: "*add_jira_comment"
+    mode: governed
+    workflow: jira

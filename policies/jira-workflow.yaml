@@ -1,0 +1,12 @@
+version: "2026-10-03"
+
+default:
+  decision: review
+  reason: "Jira writes require the requesting user's confirmation before submission."
+  approver_group: current_user
+
+rules:
+  - id: jira-delete-deny
+    tool: "*delete_jira_ticket"
+    decision: deny
+    reason: "Agent is not allowed to delete Jira issues."

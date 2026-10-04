@@ -1,0 +1,23 @@
+FROM ghcr.io/open-webui/open-webui:v0.11.4-slim
+
+USER root
+
+ARG CLAUDE_CODE_VERSION=2.1.195
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nodejs npm \
+    && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && python -m pip install --no-cache-dir \
+        "claude-agent-sdk>=0.1.60" "anthropic>=0.40.0" "PyYAML>=6.0" \
+    && claude --version \
+    && python -c "import claude_agent_sdk, anthropic, yaml" \
+    && rm -rf /var/lib/apt/lists/* /root/.npm
+
+ENV DISABLE_AUTOUPDATER=1 \
+    DISABLE_TELEMETRY=1 \
+    DISABLE_ERROR_REPORTING=1
+
+# Keep the server-side approval gate and the review form in the same image.
+# The installer asserts the pinned frontend branch before changing any assets.
+COPY frontend /opt/owui-jira-review
+RUN python /opt/owui-jira-review/patch_frontend.py /app/build

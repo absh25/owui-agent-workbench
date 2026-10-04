@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jira 确认表单预览</title>
+  <link rel="stylesheet" href="jira-confirmation.css">
+  <script src="jira-confirmation.js"></script>
+  <style>
+    body { margin: 0; background: #f6f7f9; color: #1f2937; font: 14px/1.6 system-ui, 'Microsoft YaHei', sans-serif; }
+    main { max-width: 860px; margin: 70px auto; padding: 24px; }
+    h1 { font-size: 28px; letter-spacing: -1px; }
+    #open { padding: 10px 18px; border: 0; border-radius: 10px; color: white; background: #1f2937; font: inherit; cursor: pointer; }
+    #result { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+    html.dark body { background: #161616; color: #ededed; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Jira 提交预览</h1>
+    <p>这是独立演示，不会连接 Jira 或提交工单。</p>
+    <button id="open" type="button">打开确认表单</button>
+    <pre id="result"></pre>
+  </main>
+  <script>
+    const sample = () => ({
+      title: '确认创建 Jira 工单',
+      jira_form: {
+        version: 1, request_id: 'demo-review-request', operation: '创建工单',
+        fields: [
+          {name: 'project_key', label: '项目', value: 'KAN', required: true,
+            options: [{value: 'KAN', label: 'KAN · 我的软件团队'}]},
+          {name: 'issue_type', label: '工单类型', value: '10003', required: true,
+            options: [{value: '10003', label: '任务'}, {value: '10004', label: '故事'}]},
+          {name: 'summary', label: '标题', value: '核对频谱感知的采样率与检测阈值', required: true, max_length: 255},
+          {name: 'description', label: '描述', value: '查阅 ragflow 中的 SS-TEST-042 文档，核对采样率和阈值，并补充原文引用。\n\n证据足够后生成演示参数模块，运行两个测试，等待人工确认。', multiline: true, required: false, max_length: 32000},
+          {name: 'priority', label: '优先级', value: '', required: false},
+          {name: 'assignee_account_id', label: '负责人账号 ID', value: '', required: false}
+        ]
+      }
+    });
+    const query = new URLSearchParams(location.search);
+    if (query.has('dark')) document.documentElement.classList.add('dark');
+    document.getElementById('open').addEventListener('click', async () => {
+      const response = await window.openJiraConfirmation(sample());
+      document.getElementById('result').textContent = JSON.stringify(response, null, 2);
+    });
+
+    const assert = (condition, message) => { if (!condition) throw new Error(message); };
+    const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+    const input = name => document.querySelector(`.jira-review [name="${name}"]`);
+    const setInput = (name, value) => {
+      input(name).value = value;
+      input(name).dispatchEvent(new Event('input', {bubbles: true}));
+    };
+    async function selfTest() {
+      const results = [];
+      const check = async (name, run) => { await run(); results.push(name); };
+      await check('edited draft returned exactly once', async () => {
+        const pending = window.openJiraConfirmation(sample());
+        assert(document.activeElement === input('summary'), 'initial focus is not title');
+        setInput('summary', '人工修改后的标题');
+        setInput('description', '人工修改后的描述\n第二行');
+        input('issue_type').value = '10004';
+        const submit = document.querySelector('.jira-review [type="submit"]');
+        submit.click();
+        submit.click();
+        const result = await pending;
+        assert(result.confirmed === true && result.request_id === 'demo-review-request', 'approval binding missing');
+        assert(result.arguments.summary === '人工修改后的标题', 'edited title was lost');
+        assert(result.arguments.description === '人工修改后的描述\n第二行', 'edited description was lost');
+        assert(result.arguments.issue_type === '10004' && result.arguments.priority === '', 'select or optional value was lost');
+        assert(!document.querySelector('.jira-review'), 'form was not removed after approval');
+      });
+      await check('required whitespace blocks submit and can be corrected', async () => {
+        const pending = window.openJiraConfirmation(sample());
+        setInput('summary', '   ');
+        document.querySelector('.jira-review [type="submit"]').click();
+        assert(document.querySelector('.jira-review').open, 'invalid draft was accepted');
+        assert(input('summary').maxLength === 255, 'maximum title length is missing');
+        setInput('summary', '有效标题');
+        document.querySelector('.jira-review [type="submit"]').click();
+        assert((await pending).arguments.summary === '有效标题', 'corrected draft cannot submit');
+      });
+      await check('cancel and close return false', async () => {
+        let pending = window.openJiraConfirmation(sample());
+        document.querySelector('.jira-review__button--secondary').click();
+        assert(await pending === false, 'cancel accepted a draft');
+        pending = window.openJiraConfirmation(sample());
+        document.querySelector('.jira-review__close').click();
+        assert(await pending === false, 'close accepted a draft');
+      });
+      await check('Escape cancels and keyboard focus stays inside', async () => {
+        const pending = window.openJiraConfirmation(sample());
+        const dialog = document.querySelector('.jira-review');
+        const submit = dialog.querySelector('[type="submit"]');
+        submit.focus();
+        submit.dispatchEvent(new KeyboardEvent('keydown', {key: 'Tab', bubbles: true, cancelable: true}));
+        assert(document.activeElement === dialog.querySelector('.jira-review__close'), 'tab escaped the form');
+        dialog.dispatchEvent(new Event('cancel', {cancelable: true}));
+        assert(await pending === false, 'Escape accepted a draft');
+      });
+      await check('user text is displayed literally', async () => {
+        const data = sample();
+        data.title = '<img src=x onerror=alert(1)>';
+        data.jira_form.fields[0].label = '<script>alert(1)</' + 'script>';
+        const pending = window.openJiraConfirmation(data);
+        assert(!document.querySelector('.jira-review img, .jira-review script'), 'untrusted HTML was inserted');
+        assert(document.querySelector('.jira-review__title').textContent === data.title, 'title changed');
+        document.querySelector('.jira-review__close').click();
+        assert(await pending === false, 'cancel failed');
+      });
+      await check('concurrent requests and malformed payload fail closed', async () => {
+        const pending = window.openJiraConfirmation(sample());
+        let rejected = false;
+        try { await window.openJiraConfirmation(sample()); } catch (_) { rejected = true; }
+        assert(rejected && document.querySelectorAll('.jira-review').length === 1, 'concurrent review replaced another draft');
+        document.querySelector('.jira-review__close').click();
+        await pending;
+        const data = sample();
+        data.jira_form.fields[0].name = '__proto__';
+        rejected = false;
+        try { await window.openJiraConfirmation(data); } catch (_) { rejected = true; }
+        assert(rejected && !document.querySelector('.jira-review'), 'malformed field was accepted');
+      });
+      await check('focus restores to the previous control', async () => {
+        const opener = document.getElementById('open');
+        opener.focus();
+        const pending = window.openJiraConfirmation(sample());
+        document.querySelector('.jira-review__close').click();
+        await pending;
+        assert(document.activeElement === opener, 'previous focus was not restored');
+      });
+      document.getElementById('result').textContent = JSON.stringify({status: 'passed', count: results.length, tests: results});
+      document.body.dataset.testStatus = 'passed';
+    }
+    if (query.has('test')) {
+      selfTest().catch(error => {
+        document.getElementById('result').textContent = JSON.stringify({status: 'failed', error: error.message});
+        document.body.dataset.testStatus = 'failed';
+      });
+    } else if (query.has('open')) {
+      window.openJiraConfirmation(sample());
+    }
+  </script>
+</body>
+</html>
